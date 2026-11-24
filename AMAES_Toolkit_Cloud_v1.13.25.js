@@ -5545,6 +5545,19 @@ async function loadJennysonlineAnswersForCourse(subjectCode) {
         }
     }
 
+    async function buildGeminiPromptWithSharedReviewer(qData, courseCode, que) {
+        let promptText = buildGeminiCompactPrompt(qData, courseCode, que);
+        const reviewerContext = await getSharedReviewerContext(
+            qData && qData.qText,
+            courseCode
+        );
+        if (reviewerContext) {
+            promptText += reviewerContext +
+                '\n\nPrioritize the supplied course reviewer when it directly supports an answer. If the reviewer does not support an answer, do not guess or claim it does.';
+        }
+        return promptText;
+    }
+
     async function runAutoQuizSolver(forceRun = false) {
         if (!isTermsAcknowledged()) {
             autoQuizMode = false;
@@ -5961,11 +5974,11 @@ async function loadJennysonlineAnswersForCourse(subjectCode) {
                     // Built-in acceleration on multi-question pages: concurrently solve other visible unknown questions
                     if (fastQuizMode && queContainers.length > 1 && unverifiedQuestions.length > 1) {
                         const otherQue = unverifiedQuestions.slice(1);
-                        otherQue.forEach(oQue => {
+                        otherQue.forEach(async oQue => {
                             if (oQue.querySelector('.amaes-ai-suggested-choice, .amaes-ai-text-badge') || isQuestionAnswered(oQue)) return;
                             const oQData = extractQuestionData(oQue);
                             if (oQData && isEligibleForAiSolver(oQue, oQData)) {
-                                const oPrompt = buildGeminiCompactPrompt(oQData, courseCode, oQue);
+                                const oPrompt = await buildGeminiPromptWithSharedReviewer(oQData, courseCode, oQue);
                                 handleGeminiQuestionInference({
                                     que: oQue,
                                     qData: oQData,
@@ -6004,11 +6017,11 @@ async function loadJennysonlineAnswersForCourse(subjectCode) {
                         if (activeKey && aiQuizEnabled) {
                             const courseInfo = detectCourseInfo();
                             const courseCode = courseInfo.subjectCode || '';
-                            unverifiedQuestions.slice(1).forEach(oQue => {
+                            unverifiedQuestions.slice(1).forEach(async oQue => {
                                 if (oQue.querySelector('.amaes-ai-suggested-choice, .amaes-ai-text-badge') || isQuestionAnswered(oQue)) return;
                                 const oQData = extractQuestionData(oQue);
                                 if (oQData && isEligibleForAiSolver(oQue, oQData)) {
-                                    const oPrompt = buildGeminiCompactPrompt(oQData, courseCode, oQue);
+                                    const oPrompt = await buildGeminiPromptWithSharedReviewer(oQData, courseCode, oQue);
                                     handleGeminiQuestionInference({
                                         que: oQue,
                                         qData: oQData,
@@ -18307,7 +18320,7 @@ function setupAccountTransferUI() {
             setLog("[AI Matching] Analyzing matching rows with Gemini...", "var(--accent-purple)");
         }
 
-        const promptText = buildGeminiCompactPrompt(qData, courseCode, que);
+        const promptText = await buildGeminiPromptWithSharedReviewer(qData, courseCode, que);
 
         await handleGeminiQuestionInference({
             que,
