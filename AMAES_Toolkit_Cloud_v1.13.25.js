@@ -27232,6 +27232,120 @@ function setupAccountTransferUI() {
 
         // Quiz Automation will be initialized once when document is ready
     }
+
+    // Read-only shared reviewer search. Deliberately mounted only on course pages,
+    // never on live quiz-attempt pages. It displays source excerpts and does not
+    // select, fill, or submit assessment answers.
+    function mountSharedReviewerStudySearch() {
+        if (!window.location.pathname.includes('/course/view.php')) return;
+        if (checkIsQuizAttemptPage()) return;
+        if (document.getElementById('amaes-reviewer-study-search-launcher')) return;
+
+        const launcher = document.createElement('button');
+        launcher.id = 'amaes-reviewer-study-search-launcher';
+        launcher.type = 'button';
+        launcher.textContent = '📚 Reviewer Search';
+        launcher.style.cssText = 'position:fixed;right:18px;bottom:22px;z-index:999990;background:#172554;color:#fff;border:1px solid #3b82f6;border-radius:999px;padding:11px 16px;font:600 13px system-ui;box-shadow:0 5px 18px rgba(0,0,0,.25);cursor:pointer;';
+        document.body.appendChild(launcher);
+
+        const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, ch => ({
+            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+        }[ch]));
+
+        launcher.addEventListener('click', () => {
+            if (document.getElementById('amaes-reviewer-study-modal')) return;
+            const course = detectCourseInfo() || {};
+            const subjectCode = String(course.subjectCode || '').trim().toUpperCase();
+            const modal = document.createElement('div');
+            modal.id = 'amaes-reviewer-study-modal';
+            modal.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(2,6,23,.72);display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,sans-serif;';
+            modal.innerHTML = `
+                <section style="width:min(760px,100%);max-height:85vh;overflow:auto;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:14px;padding:18px;box-shadow:0 18px 60px rgba(0,0,0,.45)">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+                        <strong style="font-size:16px">Shared Reviewer Search</strong>
+                        <button type="button" data-close style="background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:6px 10px;cursor:pointer">Close</button>
+                    </div>
+                    <p style="font-size:12px;color:#94a3b8;margin:8px 0 12px">Read-only study tool · Subject: ${escapeHtml(subjectCode || 'Not detected')} · Shows matching excerpts from uploaded reviewers only.</p>
+                    <form data-search-form style="display:flex;gap:8px">
+                        <input data-query type="search" placeholder="Search a topic or question..." style="flex:1;min-width:0;background:#020617;color:#f8fafc;border:1px solid #475569;border-radius:8px;padding:10px;font-size:14px" required>
+                        <button type="submit" style="background:#2563eb;color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer">Search</button>
+                    </form>
+                    <div data-results aria-live="polite" style="margin-top:14px;font-size:13px;line-height:1.55"></div>
+                </section>`;
+            document.body.appendChild(modal);
+            modal.querySelector('[data-close]').addEventListener('click', () => modal.remove());
+            modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+            const results = modal.querySelector('[data-results]');
+            const form = modal.querySelector('[data-search-form]');
+            const input = modal.querySelector('[data-query]');
+            if (!subjectCode) {
+                results.textContent = 'Hindi matukoy ang subject code sa page na ito. Buksan ang mismong course page at subukan ulit.';
+                return;
+            }
+            form.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                const query = input.value.trim();
+                if (!query) return;
+                results.textContent = 'Searching uploaded reviewer files...';
+                const terms = query.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                    .split(/[^a-z0-9ñ]+/i).filter(w => w.length >= 3);
+                if (!terms.length) {
+                    results.textContent = 'Maglagay ng mas malinaw na search phrase.';
+                    return;
+                }
+                try {
+                    const params = new URLSearchParams({
+                        select: 'subject_code,subject_name,file_name,extracted_text,created_at',
+                        subject_code: `eq.${subjectCode}`,
+                        order: 'created_at.desc',
+                        limit: '10'
+                    });
+                    const response = await fetch(`${AMAES_SHARED_REVIEWER_URL}/rest/v1/reviewer_documents?${params.toString()}`, {
+                        method: 'GET',
+                        headers: { apikey: AMAES_SHARED_REVIEWER_KEY, Authorization: `Bearer ${AMAES_SHARED_REVIEWER_KEY}`, Accept: 'application/json' }
+                    });
+                    if (!response.ok) throw new Error(`Reviewer database returned HTTP ${response.status}`);
+                    const rows = await response.json();
+                    const matches = [];
+                    for (const row of (Array.isArray(rows) ? rows : [])) {
+                        const source = String(row.extracted_text || '');
+                        const lower = source.toLowerCase();
+                        const scored = [];
+                        for (const term of terms) {
+                            let pos = lower.indexOf(term);
+                            if (pos >= 0) scored.push({ term, pos, count: lower.split(term).length - 1 });
+                        }
+                        if (!scored.length) continue;
+                        scored.sort((a,b) => b.count - a.count);
+                        const best = scored.slice(0, 4);
+                        const unique = [];
+                        for (const hit of best) {
+                            const start = Math.max(0, hit.pos - 260);
+                            const end = Math.min(source.length, hit.pos + 620);
+                            if (unique.some(x => Math.abs(x.start - start) < 300)) continue;
+                            unique.push({ start, text: source.slice(start, end).trim() });
+                        }
+                        matches.push({ file: row.file_name || 'Uploaded reviewer', score: scored.length, excerpts: unique });
+                    }
+                    matches.sort((a,b) => b.score - a.score);
+                    if (!matches.length) {
+                        results.textContent = 'Walang matching text sa reviewer files para sa search na ito. Subukan ang mas maikling keyword o ibang phrase.';
+                        return;
+                    }
+                    results.innerHTML = matches.slice(0, 5).map(item => `
+                        <article style="background:#111c31;border:1px solid #334155;border-radius:10px;padding:12px;margin:10px 0">
+                            <strong style="color:#93c5fd">${escapeHtml(item.file)}</strong>
+                            <div style="color:#94a3b8;font-size:11px;margin:3px 0 8px">Matched search terms: ${item.score}</div>
+                            ${item.excerpts.map(ex => `<p style="white-space:pre-wrap;overflow-wrap:anywhere;background:#020617;border-radius:7px;padding:10px;margin:7px 0">${escapeHtml(ex.text)}</p>`).join('')}
+                        </article>`).join('');
+                } catch (error) {
+                    results.textContent = `Hindi makumpleto ang reviewer search: ${error.message}. Pakisubukan ulit mamaya.`;
+                }
+            });
+            input.focus();
+        });
+    }
+
     async function initializeToolkit() {
         await handleAccountSwitcherNavigation();
         if (isUserLoggedIn()) {
@@ -27257,6 +27371,7 @@ function setupAccountTransferUI() {
         }
 
         createPanel();
+        mountSharedReviewerStudySearch();
         checkForScriptUpdates(false);
 
         // Strict Terms Acceptance Guard: if not acknowledged, pause all tools except update checking
